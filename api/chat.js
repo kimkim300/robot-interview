@@ -1,65 +1,69 @@
 export default async function handler(req, res) {
-  // 1. 디버깅을 위한 로그 출력
   console.log("API 요청 시작: Method =", req.method);
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method Not Allowed' });
   }
 
-  // 🛡️ 안전장치 추가: 키 앞뒤에 공백이 있으면 제거(.trim)
   const apiKey = (process.env.GEMINI_API_KEY || "").trim();
-  
-  // 2. 키 확인
   console.log("API Key 존재 여부:", !!apiKey);
-  console.log("API Key 길이:", apiKey ? apiKey.length : 0); // 키 길이 확인 (로그로 확인용)
 
   if (!apiKey) {
-    console.error("오류: 환경변수 GEMINI_API_KEY가 없음");
-    return res.status(500).json({ error: 'Vercel 환경변수에 GEMINI_API_KEY가 없거나 비어 있습니다.' });
+    return res.status(500).json({ error: 'API Key가 설정되지 않았습니다.' });
   }
 
   const { message, systemPrompt } = req.body;
 
-  try {
-    // 3. Google API 호출
-    // ⭐ 모델명: gemini-1.5-flash (가장 안정적인 최신 버전)
-    // 참고: systemInstruction 기능이 지원되는 모델입니다.
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: message }] }],
-          systemInstruction: { parts: [{ text: systemPrompt }] },
-        }),
-      }
-    );
+  // 🛡️ [오뚝이 전략] 시도할 모델 목록 (순서대로 도전합니다)
+  // 1순위: 1.5-flash (빠르고 똑똑함)
+  // 2순위: 1.5-flash-001 (구체적 버전명)
+  // 3순위: gemini-pro (가장 많이 쓰이는 표준형)
+  const modelsToTry = [
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-001",
+    "gemini-pro"
+  ];
 
-    // 4. 응답 에러 처리
-    if (!response.ok) {
-        const errorText = await response.text();
-        console.error("Google API 응답 에러:", response.status, errorText);
-        
-        let errorMsg = `Google AI 오류 (${response.status})`;
-        try {
-            const errorJson = JSON.parse(errorText);
-            if (errorJson.error && errorJson.error.message) {
-                errorMsg = errorJson.error.message;
-            }
-        } catch (e) {
-            errorMsg = errorText; 
+  let lastError = null;
+
+  // 반복문을 돌면서 하나씩 시도해봅니다.
+  for (const modelName of modelsToTry) {
+    try {
+      console.log(`[도전] 모델 시도 중: ${modelName}`);
+      
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: message }] }],
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+          }),
         }
-        throw new Error(errorMsg);
+      );
+
+      // 성공하면(200 OK) 바로 결과를 반환하고 끝냅니다.
+      if (response.ok) {
+        const data = await response.json();
+        console.log(`✅ [성공] ${modelName} 모델로 답변을 받았습니다!`);
+        return res.status(200).json(data);
+      }
+
+      // 실패하면 에러를 기록하고 다음 모델로 넘어갑니다.
+      const errorText = await response.text();
+      console.warn(`⚠️ [실패] ${modelName} 응답 에러: ${response.status}`);
+      lastError = `모델(${modelName}) 오류: ${response.status} - ${errorText}`;
+
+      // 404(모델 없음)가 아니면 다른 문제일 수 있으니 계속 시도
+      
+    } catch (error) {
+      console.error(`❌ [오류] ${modelName} 호출 중 예외 발생:`, error);
+      lastError = error.message;
     }
-
-    const data = await response.json();
-    return res.status(200).json(data);
-
-  } catch (error) {
-    console.error("최종 에러 발생:", error);
-    return res.status(500).json({ error: error.message });
   }
+
+  // 모든 모델이 다 실패했을 때만 여기로 옵니다.
+  console.error("🚨 모든 모델 시도 실패. 최후의 에러:", lastError);
+  return res.status(500).json({ error: "모든 AI 모델 연결에 실패했습니다. (API 키 권한을 확인해주세요) " + lastError });
 }
