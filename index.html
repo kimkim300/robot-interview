@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>나 혼자 사는 이웃에게 물어봐!</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f4f8;
+        }
+        .chat-bubble-user {
+            background-color: #4f46e5;
+            color: white;
+            border-radius: 1.5rem 1.5rem 0.5rem 1.5rem;
+        }
+        .chat-bubble-ai {
+            background-color: #ffffff;
+            color: #1f2937;
+            border-radius: 1.5rem 1.5rem 1.5rem 0.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+        .persona-button {
+            transition: all 0.3s ease;
+        }
+        .persona-button:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+        }
+        .scrollable {
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        .notification {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            background-color: #10b981;
+            color: white;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            z-index: 1000;
+            opacity: 0;
+            transition: opacity 0.5s;
+        }
+        .notification.show {
+            opacity: 1;
+        }
+        #teacher-dashboard table th, #teacher-dashboard table td {
+            border: 1px solid #e5e7eb;
+            vertical-align: top;
+        }
+    </style>
+</head>
+<body class="min-h-screen p-4">
+
+    <!-- Firebase SDK Imports -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, setDoc, doc, collection, query, where, onSnapshot, addDoc, serverTimestamp, getDoc, deleteDoc, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        setLogLevel('Debug');
+
+        let app, db, auth, userId;
+        
+        // Vercel/GitHub 배포용 고정 앱 ID
+        const APP_ID_FOR_GITHUB = 'robot-interview-app-2025'; 
+        
+        // Firebase 설정 (이건 공개되어도 괜찮은 키입니다)
+        const CUSTOM_FIREBASE_CONFIG = {
+            apiKey: "AIzaSyBMQMydcg_lP2t_TAhdVWYUtSgTMDmKwmE",
+            authDomain: "airobot-3d894.firebaseapp.com",
+            projectId: "airobot-3d894",
+            storageBucket: "airobot-3d894.firebasestorage.app",
+            messagingSenderId: "521833072411",
+            appId: "1:521833072411:web:26e946cd7b26cb6af2f5be",
+            measurementId: "G-Z55XBFJRGW" 
+        };
+        
+        const appId = typeof __app_id !== 'undefined' ? __app_id : APP_ID_FOR_GITHUB;
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : CUSTOM_FIREBASE_CONFIG;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // =========================================================================
+        // 🔒 [보안 중요] API 키 제거됨
+        // 이제 코드가 직접 Google과 통신하지 않고, Vercel 서버(/api/chat)로 요청을 보냅니다.
+        // 따라서 여기에 API Key를 적을 필요가 없습니다.
+        // =========================================================================
+
+        const TEACHER_PIN = '0000';
+        window.isTeacherLoggedIn = false;
+
+        // --- DRAFT PERSISTENCE FUNCTIONS ---
+        const saveDraft = async (personaId, ideaContent) => {
+            if (!db || !userId) return;
+            const draftPath = `artifacts/${appId}/users/${userId}/drafts`;
+            try {
+                await setDoc(doc(db, draftPath, personaId), {
+                    content: ideaContent,
+                    lastUpdated: serverTimestamp()
+                });
+                console.log(`Draft for ${personaId} saved successfully.`);
+            } catch (error) {
+                console.error("Draft saving failed:", error);
+            }
+        };
+
+        const loadDraft = async (personaId) => {
+            if (!db || !userId) return null;
+            const draftPath = `artifacts/${appId}/users/${userId}/drafts`;
+            try {
+                const docSnap = await getDoc(doc(db, draftPath, personaId));
+                if (docSnap.exists() && docSnap.data().content) {
+                    return docSnap.data().content;
+                }
+            } catch (error) {
+                console.error("Draft loading failed:", error);
+            }
+            return null;
+        };
+
+        // --- TEACHER DASHBOARD FUNCTIONS ---
+        window.deleteIdea = async (docId) => {
+            if (!db || !window.isTeacherLoggedIn) {
+                showNotification('삭제 권한이 없습니다.', 'error');
+                return;
+            }
+            const collectionPath = `artifacts/${appId}/public/data/robot_ideas`;
+            try {
+                await deleteDoc(doc(db, collectionPath, docId));
+                showNotification('아이디어가 삭제되었습니다.', 'success');
+            } catch (error) {
+                console.error("아이디어 삭제 실패:", error);
+                showNotification('오류 발생.', 'error');
+            }
+        };
+
+        const loadAllSubmittedIdeas = () => {
+            if (!db) return;
+            const collectionPath = `artifacts/${appId}/public/data/robot_ideas`;
+            const ideasRef = collection(db, collectionPath);
+            
+            onSnapshot(ideasRef, (snapshot) => {
+                const listContainer = document.getElementById('teacher-ideas-list');
+                if (snapshot.empty) {
+                    listContainer.innerHTML = '<p class="text-lg text-gray-500 italic mt-4">제출된 아이디어가 없습니다.</p>';
+                    return;
+                }
+                
+                const sortedDocs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+                    .sort((a, b) => (b.timestamp?.toDate() || new Date(0)) - (a.timestamp?.toDate() || new Date(0)));
+
+                let htmlContent = `
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full bg-white rounded-xl shadow-lg border border-gray-200">
+                            <thead>
+                                <tr class="bg-indigo-600 text-white uppercase text-sm leading-normal">
+                                    <th class="py-3 px-6 text-left rounded-tl-xl">학생 (ID)</th>
+                                    <th class="py-3 px-6 text-left">대상</th>
+                                    <th class="py-3 px-6 text-left">내용</th>
+                                    <th class="py-3 px-6 text-center">시간</th>
+                                    <th class="py-3 px-6 text-center rounded-tr-xl">관리</th>
+                                </tr>
+                            </thead>
+                            <tbody class="text-gray-700 text-sm font-light">
+                `;
+                
+                sortedDocs.forEach(data => {
+                    const timestamp = data.timestamp && data.timestamp.toDate ? 
+                                      data.timestamp.toDate().toLocaleString('ko-KR') : '정보 없음';
+                    const studentIdShort = data.studentId ? data.studentId.substring(0, 8) : 'unknown';
+                    const ideaPreview = data.ideaContent ? (data.ideaContent.length > 100 ? data.ideaContent.substring(0, 100) + '...' : data.ideaContent) : '';
+                    
+                    htmlContent += `
+                        <tr class="border-b border-gray-200 hover:bg-indigo-50 transition-colors">
+                            <td class="py-3 px-6 text-left whitespace-nowrap">
+                                <span class="font-semibold">${data.studentName || '이름없음'}</span> 
+                                <span class="text-xs text-gray-500 block">(${studentIdShort}...)</span>
+                            </td>
+                            <td class="py-3 px-6 text-left font-medium">${data.persona || '-'}</td>
+                            <td class="py-3 px-6 text-left max-w-lg whitespace-normal text-xs">${ideaPreview.replace(/\n/g, '<br>')}</td>
+                            <td class="py-3 px-6 text-center whitespace-nowrap text-xs text-gray-500">${timestamp}</td>
+                            <td class="py-3 px-6 text-center whitespace-nowrap text-xs">
+                                <button onclick="window.deleteIdea('${data.id}')" class="bg-red-500 text-white p-2 rounded-lg text-xs hover:bg-red-600 transition-colors shadow-md">
+                                    <i data-lucide="trash-2" class="w-4 h-4 inline"></i> 삭제
+                                </button>
+                            </td>
+                        </tr>
+                    `;
+                });
+
+                htmlContent += `</tbody></table></div>`;
+                listContainer.innerHTML = htmlContent;
+                lucide.createIcons();
+            });
+        };
+
+        window.startApp = async () => {
+            if (Object.keys(firebaseConfig).length > 0 && firebaseConfig.apiKey !== "YOUR_API_KEY_HERE") {
+                try {
+                    app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+
+                    if (initialAuthToken && typeof __firebase_config !== 'undefined') {
+                        await signInWithCustomToken(auth, initialAuthToken);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+
+                    onAuthStateChanged(auth, (user) => {
+                        if (user) {
+                            userId = user.uid;
+                            document.getElementById('user-info').innerHTML = `사용자 ID: ${userId}`;
+                        } else {
+                            userId = crypto.randomUUID();
+                            document.getElementById('user-info').innerHTML = `사용자 ID: (익명) ${userId.substring(0, 8)}...`;
+                        }
+                    });
+                } catch (error) {
+                    console.error("Firebase Auth Failed:", error);
+                    document.getElementById('user-info').innerHTML = `Firebase 오류`;
+                }
+            } else {
+                 console.warn("Firebase config missing.");
+                 document.getElementById('user-info').innerHTML = `🚨 Firebase 설정 확인 필요`;
+            }
+            
+            document.getElementById('initial-loading').classList.add('hidden');
+            document.getElementById('persona-selection').classList.remove('hidden');
+        };
+
+        window.onload = window.startApp;
+
+        // --- Global Application State ---
+        window.currentPersona = null;
+        window.messageCount = 0;
+        window.aiIsTyping = false;
+        window.awaitingSummaryConfirmation = false;
+        window.studentName = '학생';
+
+        const PERSONAS = {
+            narae: {
+                name: '나래', age: '20대 대학생',
+                image: `<div class="flex items-center justify-center w-20 h-20 bg-blue-500 rounded-full text-white text-3xl font-bold mb-3 shadow-inner">👩‍🎓</div>`,
+                color: 'bg-blue-500',
+                desc: '학업과 아르바이트를 병행하며 원룸에 거주',
+                quickQs: ['혼자 밥 먹을 때?', '세탁이 힘들어요?', '집안일은 누가 해요?', '학교 다니기 힘들어요?', '가장 필요한 로봇은?'],
+                summary: ['매번 한 끼 챙기기', '밀린 빨래와 청소', '무거운 짐 나르기']
+            },
+            gian: {
+                name: '기안', age: '30대 회사원',
+                image: `<div class="flex items-center justify-center w-20 h-20 bg-emerald-500 rounded-full text-white text-3xl font-bold mb-3 shadow-inner">👨‍💼</div>`,
+                color: 'bg-emerald-500',
+                desc: '일과 자기 계발에 집중하며 오피스텔에 거주',
+                quickQs: ['외로울 때는?', '아프면 누가 도와줘요?', '집 보안이 걱정돼요?', '음식물 쓰레기는?', '가장 필요한 로봇은?'],
+                summary: ['바쁜 일상 속 건강한 식사', '혼자 아플 때 돌봐줄 사람', '집 안팎의 안전 관리']
+            },
+            hyunmoo: {
+                name: '현무 할머니', age: '70대 독거 노인',
+                image: `<div class="flex items-center justify-center w-20 h-20 bg-amber-500 rounded-full text-white text-3xl font-bold mb-3 shadow-inner">👵</div>`,
+                color: 'bg-amber-500',
+                desc: '작은 주택에 거주하며 건강 관리가 필요함',
+                quickQs: ['건강은 누가 챙겨줘요?', '무거운 짐은 누가 날라줘요?', '외출이 힘든가요?', '가장 외로울 때는?', '가장 필요한 로봇은?'],
+                summary: ['무거운 짐 나르기 및 이동 보조', '정확한 약 복용 관리', '갑작스러운 사고 대비 및 응급 호출']
+            }
+        };
+
+        // --- Navigation ---
+        window.goToTeacherDashboard = () => {
+            document.getElementById('persona-selection').classList.add('hidden');
+            document.getElementById('chat-interface').classList.add('hidden');
+            document.getElementById('robot-idea-note').classList.add('hidden');
+            document.getElementById('teacher-dashboard').classList.remove('hidden');
+            document.getElementById('teacher-login-screen').classList.remove('hidden');
+            document.getElementById('teacher-dashboard-content').classList.add('hidden');
+            document.getElementById('teacher-pin-input').value = '';
+            document.getElementById('teacher-login-error').textContent = '';
+            document.getElementById('teacher-pin-input').focus();
+        };
+
+        window.attemptTeacherLogin = () => {
+            const pin = document.getElementById('teacher-pin-input').value.trim();
+            if (pin === TEACHER_PIN) {
+                window.isTeacherLoggedIn = true;
+                document.getElementById('teacher-login-screen').classList.add('hidden');
+                document.getElementById('teacher-dashboard-content').classList.remove('hidden');
+                loadAllSubmittedIdeas();
+            } else {
+                document.getElementById('teacher-login-error').textContent = '잘못된 비밀번호입니다.';
+                document.getElementById('teacher-pin-input').value = '';
+                document.getElementById('teacher-pin-input').focus();
+            }
+        };
+
+        window.goToHomeFromTeacher = () => {
+            document.getElementById('teacher-dashboard').classList.add('hidden');
+            document.getElementById('persona-selection').classList.remove('hidden');
+            window.isTeacherLoggedIn = false;
+        };
+
+        const showNotification = (message, type = 'info') => {
+            const notification = document.getElementById('notification');
+            notification.textContent = message;
+            notification.className = 'notification show';
+            if (type === 'success') notification.style.backgroundColor = '#10b981';
+            else if (type === 'error') notification.style.backgroundColor = '#ef4444';
+            else notification.style.backgroundColor = '#3b82f6';
+            setTimeout(() => { notification.classList.remove('show'); }, 3000);
+        };
+
+        window.saveIdea = async () => {
+            const ideaContent = document.getElementById('idea-note-textarea').value.trim();
+            if (!ideaContent || !db || !userId || !window.currentPersona) {
+                showNotification('저장할 내용이나 정보가 부족합니다.', 'error');
+                return;
+            }
+            const persona = window.currentPersona;
+            const ideaData = {
+                studentId: userId,
+                studentName: window.studentName,
+                persona: persona.name,
+                ideaContent: ideaContent,
+                timestamp: serverTimestamp(),
+                appId: appId
+            };
+            try {
+                const collectionPath = `artifacts/${appId}/public/data/robot_ideas`;
+                await addDoc(collection(db, collectionPath), ideaData);
+                await saveDraft(persona.id, ideaContent);
+                showNotification('아이디어가 성공적으로 저장되었습니다!', 'success');
+            } catch (error) {
+                console.error("저장 실패:", error);
+                showNotification('저장 중 오류 발생', 'error');
+            }
+        };
+
+        window.goToHome = () => {
+            const currentIdeaContent = document.getElementById('idea-note-textarea').value;
+            if (window.currentPersona && window.currentPersona.id) {
+                saveDraft(window.currentPersona.id, currentIdeaContent);
+            }
+            window.currentPersona = null;
+            window.messageCount = 0;
+            window.aiIsTyping = false;
+            window.awaitingSummaryConfirmation = false;
+            document.getElementById('user-input').disabled = false;
+            document.getElementById('send-button').disabled = false;
+            document.getElementById('suggest-button').disabled = false;
+            document.getElementById('chat-interface').classList.add('hidden');
+            document.getElementById('robot-idea-note').classList.add('hidden');
+            document.getElementById('persona-selection').classList.remove('hidden');
+            document.getElementById('name-input-container').classList.remove('hidden');
+            document.getElementById('teacher-dashboard').classList.add('hidden');
+        };
+
+        window.selectPersona = async (personaId) => {
+            const studentInput = document.getElementById('student-name-input').value.trim();
+            window.studentName = studentInput || '학생';
+            document.getElementById('name-input-container').classList.add('hidden');
+
+            const persona = PERSONAS[personaId];
+            persona.id = personaId;
+            window.currentPersona = persona;
+            window.messageCount = 0;
+            window.awaitingSummaryConfirmation = false;
+
+            document.getElementById('app-title').textContent = `나 혼자 사는 '${persona.name}'에게 물어봐!`;
+            document.getElementById('persona-image-container').innerHTML = persona.image;
+            document.getElementById('persona-name-display').textContent = persona.name;
+            document.getElementById('persona-desc-display').textContent = persona.age;
+            document.getElementById('chat-history').innerHTML = '';
+            
+            const initialGreeting = `안녕하세요! ${window.studentName} 학생, 저는 ${persona.age}인 ${persona.name}이라고 해요. 혼자 살면서 겪는 일들에 대해 궁금한 것이 있다면 무엇이든 편하게 물어봐요!`;
+            displayMessage('ai', initialGreeting);
+
+            const quickQContainer = document.getElementById('quick-questions');
+            quickQContainer.innerHTML = persona.quickQs.map(q => `
+                <button onclick="handleQuickQuestion('${q.replace(/'/g, "\\'")}')" 
+                        class="bg-white text-gray-700 py-2 px-3 rounded-full text-sm font-medium shadow-md hover:bg-gray-100 transition-colors whitespace-nowrap">
+                    ${q}
+                </button>
+            `).join('');
+
+            const savedDraft = await loadDraft(personaId);
+            const defaultContent = `[${persona.name}님을 위한 로봇 아이디어]\n`;
+            document.getElementById('idea-note-textarea').value = savedDraft || defaultContent;
+
+            document.getElementById('persona-selection').classList.add('hidden');
+            document.getElementById('chat-interface').classList.remove('hidden');
+            document.getElementById('robot-idea-note').classList.remove('hidden');
+            document.getElementById('teacher-dashboard').classList.add('hidden');
+        };
+        
+        // =========================================================================
+        // ⭐ 핵심 변경: Vercel 서버(심부름꾼)에게 요청하는 함수
+        // =========================================================================
+        const callGeminiApi = async (userMessage) => {
+            const persona = window.currentPersona;
+            const studentName = window.studentName;
+            
+            const systemPrompt = `
+                당신은 1인 가구 인터뷰 챗봇입니다. 이름: '${persona.name}', 나이/직업: ${persona.age}, 상황: ${persona.desc}.
+                학생 이름: '${studentName}'. 친근하게 대화하세요.
+                최우선 지침: 긍정적, 교육적, 초등 3학년 수준. 부정적 이슈 언급 금지.
+                답변 목표: 일상 속 '구체적인 불편함'과 '도움이 필요한 상황'을 설명.
+                질문 유도: 답변 끝에 학생의 생각을 묻는 질문을 자연스럽게 추가 가능.
+                길이: 2~3문장 이내.
+            `;
+
+            for (let i = 0; i < 3; i++) {
+                try {
+                    // ⭐ 변경점: Google API 주소 대신 내 서버 주소('/api/chat')로 보냄
+                    const response = await fetch('/api/chat', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ 
+                            message: userMessage,
+                            systemPrompt: systemPrompt
+                        })
+                    });
+
+                    if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
+
+                    const result = await response.json();
+                    
+                    // Vercel Serverless Function이 반환하는 구조에 맞춤
+                    if (result.candidates?.[0]?.content?.parts?.[0]?.text) {
+                        return result.candidates[0].content.parts[0].text;
+                    } else {
+                        throw new Error("Invalid API response structure.");
+                    }
+                } catch (error) {
+                    console.error("API call failed:", error);
+                    if (i < 2) {
+                        const delay = Math.pow(2, i) * 1000;
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                    } else {
+                        return `${persona.name} : 지금은 인터넷 연결이 불안정해서 답변하기 어려워요. 조금 뒤에 다시 물어봐 줄래요?`;
+                    }
+                }
+            }
+        };
+
+        const displayMessage = (sender, message) => {
+            const history = document.getElementById('chat-history');
+            const alignment = sender === 'user' ? 'justify-end' : 'justify-start';
+            const bubbleClass = sender === 'user' ? 'chat-bubble-user' : 'chat-bubble-ai';
+
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `flex ${alignment} mb-4`;
+            messageDiv.innerHTML = `
+                <div class="max-w-[80%] lg:max-w-[60%]">
+                    ${sender === 'ai' ? `<span class="text-sm font-semibold text-gray-600 mb-1 block">${window.currentPersona.name}</span>` : ''}
+                    <div class="p-3 ${bubbleClass} shadow-md">
+                        ${message}
+                    </div>
+                </div>
+            `;
+            history.appendChild(messageDiv);
+            history.scrollTop = history.scrollHeight;
+        };
+
+        window.handleSendMessage = async (message = null) => {
+            if (window.aiIsTyping) return;
+
+            const inputElement = document.getElementById('user-input');
+            const userMessage = message || inputElement.value.trim();
+            inputElement.value = '';
+            if (!userMessage) return;
+
+            const userMessageLower = userMessage.toLowerCase().trim();
+
+            if (window.awaitingSummaryConfirmation) {
+                const isPositive = ['네','yes','응','좋아요','요약'].some(v => userMessageLower.includes(v));
+                const isNegative = ['아니오','no','아니','괜찮아요','다음에'].some(v => userMessageLower.includes(v));
+
+                displayMessage('user', userMessage);
+
+                if (isPositive) {
+                    window.awaitingSummaryConfirmation = false;
+                    wrapUpInterview();
+                    return;
+                } else if (isNegative) {
+                    window.awaitingSummaryConfirmation = false;
+                    displayMessage('ai', `${window.currentPersona.name} : 네, 알겠어요! 더 궁금한 게 있으면 물어보세요.`);
+                    return;
+                } else {
+                    displayMessage('ai', `${window.currentPersona.name} : 요약할까요? '네' 또는 '아니오'로 대답해 주세요.`);
+                    return;
+                }
+            }
+
+            displayMessage('user', userMessage);
+            window.messageCount++;
+            
+            const isEighthMessage = window.messageCount === 8;
+
+            window.aiIsTyping = true;
+            inputElement.disabled = true;
+
+            const history = document.getElementById('chat-history');
+            const typingIndicator = document.createElement('div');
+            typingIndicator.id = 'typing-indicator';
+            typingIndicator.className = 'flex justify-start mb-4';
+            typingIndicator.innerHTML = `
+                <div class="max-w-[80%] lg:max-w-[60%]">
+                    <span class="text-sm font-semibold text-gray-600 mb-1 block">${window.currentPersona.name}</span>
+                    <div class="p-3 chat-bubble-ai shadow-md">... 생각 중</div>
+                </div>
+            `;
+            history.appendChild(typingIndicator);
+            history.scrollTop = history.scrollHeight;
+
+            const aiResponse = await callGeminiApi(userMessage);
+
+            typingIndicator.remove();
+            displayMessage('ai', aiResponse);
+
+            window.aiIsTyping = false;
+            inputElement.disabled = false;
+            inputElement.focus();
+
+            if (isEighthMessage) {
+                wrapUpInterview();
+            }
+        };
+
+        window.handleQuickQuestion = (question) => {
+            document.getElementById('user-input').value = question;
+            window.handleSendMessage();
+        };
+
+        window.suggestQuestions = () => {
+            if (window.aiIsTyping) return;
+            const suggestions = [
+                "이웃이 가장 힘들 때 로봇이 무엇을 해주면 좋을까요?",
+                "가장 외롭다고 느낄 때 로봇이 무엇을 해주면 좋을까요?",
+                "로봇이 있으면 생활이 어떻게 달라질 것 같아요?",
+                "만약 로봇이 있다면 이름은 무엇으로 짓고 싶어요?"
+            ];
+            const suggestedHtml = suggestions.map(q => 
+                `<p class="text-sm text-gray-700 py-1 px-2 cursor-pointer hover:bg-gray-200 rounded-md" 
+                   onclick="document.getElementById('user-input').value='${q}'; window.handleSendMessage();">
+                   ${q}
+                </p>`
+            ).join('');
+            displayMessage('ai', `질문이 막혔군요! 이런 질문은 어때요?\n<div class="mt-2 p-2 bg-gray-100 rounded-lg">${suggestedHtml}</div>`);
+        };
+
+        const wrapUpInterview = () => {
+            const persona = window.currentPersona;
+            const summaryList = persona.summary.map(item => `<li>✅ ${item}</li>`).join('');
+            const wrapUpMessage = `
+                인터뷰 고마워요! ${persona.name}님과의 대화 요약:<br><br>
+                <span class="font-bold">${persona.name}</span>님의 어려움 3가지:<br>
+                <ul class="list-disc ml-5 mt-2 space-y-1 text-sm">${summaryList}</ul>
+                <div class="mt-4 p-3 bg-yellow-100 border-l-4 border-yellow-500 rounded-md text-center font-bold text-yellow-800">
+                    이제 ${window.studentName} 학생이 로봇 설계도를 그려볼 차례예요!
+                </div>
+                <p class="mt-4 text-indigo-600 font-bold text-center">더 궁금한 점이 있으면 언제든 물어보세요!</p>
+            `;
+            displayMessage('ai', wrapUpMessage);
+            document.getElementById('user-input').disabled = false;
+            document.getElementById('send-button').disabled = false;
+            document.getElementById('suggest-button').disabled = false;
+            document.getElementById('user-input').focus();
+        };
+    </script>
+    <div id="notification" class="notification"></div>
+    <div id="initial-loading" class="flex flex-col items-center justify-center min-h-screen bg-white">
+        <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-500"></div>
+        <p class="mt-4 text-indigo-600 font-medium">앱을 준비 중입니다...</p>
+    </div>
+    <div id="persona-selection" class="hidden min-h-screen flex flex-col items-center justify-center p-8 bg-gradient-to-br from-indigo-100 to-purple-100 rounded-xl shadow-2xl">
+        <h1 class="text-4xl font-extrabold text-gray-800 mb-6 text-center">나 혼자 사는 이웃에게 물어봐!</h1>
+        <div id="name-input-container" class="w-full max-w-sm mb-8 p-4 bg-white rounded-xl shadow-md">
+            <label for="student-name-input" class="block text-lg font-medium text-gray-700 mb-2">학생 이름을 입력하세요</label>
+            <input type="text" id="student-name-input" placeholder="예: 김OO" class="w-full p-3 border-2 border-indigo-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 text-base">
+        </div>
+        <p class="text-xl text-gray-600 mb-12 text-center">인터뷰할 이웃을 선택해 주세요.</p>
+        <div class="grid md:grid-cols-3 gap-8 w-full max-w-4xl mb-12">
+            <button class="persona-button flex flex-col items-center p-6 bg-white rounded-xl shadow-lg border-b-4 border-blue-500" onclick="selectPersona('narae')">
+                <div class="flex items-center justify-center w-20 h-20 bg-blue-500 rounded-full text-white text-3xl font-bold mb-3 shadow-inner">👩‍🎓</div>
+                <p class="text-2xl font-bold text-gray-800">20대 나래</p>
+                <p class="text-sm text-gray-500 mt-1 text-center">대학생</p>
+            </button>
+            <button class="persona-button flex flex-col items-center p-6 bg-white rounded-xl shadow-lg border-b-4 border-emerald-500" onclick="selectPersona('gian')">
+                <div class="flex items-center justify-center w-20 h-20 bg-emerald-500 rounded-full text-white text-3xl font-bold mb-3 shadow-inner">👨‍💼</div>
+                <p class="text-2xl font-bold text-gray-800">30대 기안</p>
+                <p class="text-sm text-gray-500 mt-1 text-center">회사원</p>
+            </button>
+            <button class="persona-button flex flex-col items-center p-6 bg-white rounded-xl shadow-lg border-b-4 border-amber-500" onclick="selectPersona('hyunmoo')">
+                <div class="flex items-center justify-center w-20 h-20 bg-amber-500 rounded-full text-white text-3xl font-bold mb-3 shadow-inner">👵</div>
+                <p class="text-2xl font-bold text-gray-800">70대 현무 할머니</p>
+                <p class="text-sm text-gray-500 mt-1 text-center">독거 노인</p>
+            </button>
+        </div>
+        <button onclick="goToTeacherDashboard()" class="mt-8 bg-indigo-500 text-white font-semibold py-3 px-8 rounded-xl shadow-lg hover:bg-indigo-600 transition-colors flex items-center">
+            <i data-lucide="shield-check" class="w-5 h-5 mr-2"></i> 교사용 활동 확인
+        </button>
+    </div>
+    <div id="teacher-dashboard" class="hidden min-h-screen p-8 bg-gray-50 rounded-xl shadow-2xl w-full max-w-7xl mx-auto">
+        <div class="flex items-center justify-between mb-6 border-b pb-4 border-gray-300">
+            <h1 class="text-3xl font-extrabold text-indigo-700 flex items-center"><i data-lucide="graduation-cap" class="w-7 h-7 mr-3"></i> 학생 활동 대시보드</h1>
+            <button onclick="goToHomeFromTeacher()" class="text-gray-500 hover:text-indigo-600 transition-colors p-2 rounded-full hover:bg-gray-200 flex items-center"><i data-lucide="arrow-left" class="w-5 h-5 mr-1"></i> 홈으로</button>
+        </div>
+        <div id="teacher-login-screen" class="flex flex-col items-center justify-center h-96 mt-16 p-6 bg-white rounded-xl shadow-xl border-t-4 border-indigo-500">
+            <h2 class="text-3xl font-bold text-gray-800 mb-4 flex items-center"><i data-lucide="lock" class="w-7 h-7 mr-3 text-indigo-500"></i> 교사 인증</h2>
+            <p class="text-lg text-gray-500 mb-6">비밀번호를 입력하세요. (힌트: 0000)</p>
+            <input type="password" id="teacher-pin-input" placeholder="비밀번호 (PIN)" class="p-4 border-2 border-indigo-300 rounded-lg w-full max-w-sm text-center text-2xl tracking-widest font-mono focus:outline-none focus:ring-4 focus:ring-indigo-500 mb-6" onkeypress="if(event.key === 'Enter') attemptTeacherLogin()">
+            <button onclick="attemptTeacherLogin()" class="bg-indigo-600 text-white font-bold py-3 px-12 rounded-xl shadow-lg hover:bg-indigo-700 transition-transform transform hover:scale-[1.02]">로그인</button>
+            <p id="teacher-login-error" class="mt-4 text-red-500 font-medium text-sm"></p>
+        </div>
+        <div id="teacher-dashboard-content" class="hidden">
+            <p class="text-lg text-gray-600 mb-6">학생들의 제출 기록입니다.</p>
+            <p class="text-sm text-red-500 mb-4 font-semibold flex items-center"><i data-lucide="alert-triangle" class="w-4 h-4 mr-1"></i> 삭제 시 복구 불가.</p>
+            <div id="teacher-ideas-list" class="mt-8">
+                <div class="flex items-center justify-center h-20"><div class="animate-spin rounded-full h-8 w-8 border-b-2 border-indigo-500"></div><p class="ml-3 text-indigo-600">로딩 중...</p></div>
+            </div>
+        </div>
+    </div>
+    <div id="chat-interface" class="hidden w-full max-w-7xl mx-auto h-full bg-white rounded-xl shadow-2xl p-6">
+        <div class="flex items-center justify-between mb-4 border-b pb-3 border-gray-200">
+            <button onclick="goToHome()" class="text-gray-500 hover:text-indigo-600 transition-colors p-2 rounded-full hover:bg-gray-100"><i data-lucide="home" class="w-6 h-6"></i></button>
+            <h1 id="app-title" class="text-3xl font-extrabold text-gray-800 text-center flex-grow">인터뷰 시작</h1>
+            <div class="w-10"></div>
+        </div>
+        <div class="flex flex-col md:flex-row h-[80vh] gap-4">
+            <div class="flex flex-col w-full md:w-3/4 bg-gray-50 rounded-lg p-4 shadow-inner">
+                <div class="flex items-center p-3 mb-4 bg-white rounded-xl shadow-lg">
+                    <div id="persona-image-container" class="mr-4"></div>
+                    <div>
+                        <p id="persona-name-display" class="text-xl font-bold text-gray-800"></p>
+                        <p id="persona-desc-display" class="text-sm text-gray-500"></p>
+                    </div>
+                </div>
+                <div id="chat-history" class="scrollable flex-grow p-4 space-y-4 bg-gray-100 rounded-xl mb-4 shadow-inner"></div>
+                <div class="flex flex-col space-y-3">
+                    <div id="quick-questions" class="flex flex-wrap gap-2 overflow-x-auto pb-1"></div>
+                    <div class="flex space-x-2">
+                        <button id="suggest-button" onclick="suggestQuestions()" class="bg-yellow-400 text-gray-800 p-3 rounded-full font-semibold shadow-md hover:bg-yellow-500 transition-colors whitespace-nowrap">질문이 생각나지 않아요! 💡</button>
+                        <input type="text" id="user-input" placeholder="질문을 입력하세요..." class="flex-grow p-3 border border-gray-300 rounded-full focus:outline-none focus:ring-2 focus:ring-indigo-500" onkeypress="if(event.key === 'Enter') handleSendMessage()">
+                        <button id="send-button" onclick="handleSendMessage()" class="bg-indigo-600 text-white p-3 rounded-full font-semibold shadow-lg hover:bg-indigo-700 transition-colors"><i data-lucide="send" class="w-5 h-5"></i></button>
+                    </div>
+                </div>
+            </div>
+            <div id="robot-idea-note" class="hidden w-full md:w-1/4 bg-purple-50 rounded-lg p-4 shadow-lg flex flex-col space-y-3 overflow-y-auto">
+                <h2 class="text-xl font-bold text-purple-800 flex items-center mb-2"><i data-lucide="lightbulb" class="w-5 h-5 mr-2 text-purple-600"></i> 나의 로봇 아이디어 노트</h2>
+                <p class="text-sm text-purple-600 mb-3">떠오른 로봇 기능을 메모하세요!</p>
+                <textarea id="idea-note-textarea" class="h-[30vh] w-full p-3 border border-purple-300 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-purple-500" placeholder="로봇 이름: '도와줘 로봇'&#10;기능: 약 가져다주기"></textarea>
+                <button onclick="saveIdea()" class="bg-purple-600 text-white p-3 rounded-lg font-semibold shadow-md hover:bg-purple-700 transition-colors"><i data-lucide="save" class="w-5 h-5 inline mr-2"></i> 아이디어 저장하기</button>
+                <p class="text-xs text-center text-gray-500 mt-auto" id="user-info">ID 로딩 중...</p>
+            </div>
+        </div>
+    </div>
+    <script>lucide.createIcons();</script>
+</body>
+</html>
