@@ -20,10 +20,10 @@ export default async function handler(req, res) {
 
   try {
     // 3. Google API 호출
-    // ⭐ 수정됨: 최신 모델(1.5) 대신 가장 호환성이 좋은 'gemini-pro' (1.0) 모델로 변경
-    // 이렇게 하면 'Not Found' 에러를 피할 수 있습니다.
+    // ⭐ 최종 수정: 'gemini-pro' (구형) 대신 현재 표준인 'gemini-1.5-flash' 사용
+    // 이 모델 이름은 가장 안정적이며 systemInstruction 기능도 지원합니다.
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
       {
         method: 'POST',
         headers: {
