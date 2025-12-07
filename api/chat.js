@@ -19,9 +19,11 @@ export default async function handler(req, res) {
   const { message, systemPrompt } = req.body;
 
   try {
-    // 3. Google API 호출 (gemini-1.5-flash 모델 사용)
+    // 3. Google API 호출
+    // ⭐ 수정됨: 'gemini-1.5-flash' (별명) 대신 'gemini-1.5-flash-001' (정확한 버전명) 사용
+    // 이렇게 하면 모델을 못 찾는 에러를 방지할 수 있습니다.
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-001:generateContent?key=${apiKey}`,
       {
         method: 'POST',
         headers: {
